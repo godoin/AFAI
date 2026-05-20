@@ -1,137 +1,130 @@
-# Skill: PI AF Hierarchy Builder
+# Skill: PI Tag Creator
 
-**Trigger:** Use this skill when the task involves creating or modifying an AF element hierarchy in PI System Explorer — including element templates, attribute templates, and element instances.
+**Trigger:** Use this skill when the task involves verifying PI tags exist and linking AF
+attributes to PI tags via PI Point data reference. This is the bridge between the AF
+hierarchy and live data in PI Data Archive.
 
----
-
-## What this skill does
-
-Guides the AI through the correct sequence of steps to build a complete AF hierarchy from a validated input list. Covers template creation in the Library and element creation under Elements.
+Prerequisite: `pi-af-builder` skill must have completed and the element tree confirmed.
 
 ---
 
-## Prerequisites before running
+## Available MCP tools for this skill
 
-- [ ] Tag list has been uploaded and validated (no missing columns, no blank tag names)
-- [ ] Formula list has been uploaded (even if empty — confirms derived attributes)
-- [ ] BA has reviewed and approved the preview
-- [ ] `verify_tag_exists` has been run for all tags in the list
-- [ ] No existing element template with the same name (check before creating)
+| Tool | When to use |
+|---|---|
+| `list_data_servers` | Confirm the PI Data Archive server is reachable |
+| `get_data_server_points` | List existing tags on the Data Server |
+| `get_point` | Check a specific tag by name |
+| `get_attribute_by_path` | Read current data reference on an attribute |
+| `set_attribute_value` | Set a config item attribute value (non-stream) |
+| `get_stream_value` | Read the current live value of a stream attribute |
+| `update_stream_value` | Write a value to a stream attribute |
+
+---
+
+## Tag list expected format
+
+The client-provided tag list must have these columns before this skill runs.
+Claude must validate these are present — stop and surface errors if any are missing.
+
+| Column | Required | Notes |
+|---|---|---|
+| `Plant` | Yes | Maps to PowerPlant element |
+| `Unit/System` | Yes | Maps to Unit element |
+| `Source Tagname` | Yes | Original tag name from client system |
+| `Source Tag` | Yes | Actual source tag identifier |
+| `Proposed New Tagname` | Yes | The PI tag name to create — must follow naming convention |
+| `Canary Tag Path` | No | Canary integration path if applicable |
+| `Description` | No | Human-readable description |
+| `eng_units` | No | e.g. V, deg, blank if none |
+| `Date Added` | No | For audit purposes |
+| `Data Tag Naming for Checking (Remarks)` | No | BA notes on naming |
+
+---
+
+## Naming convention validation
+
+Before any tag operation, validate `Proposed New Tagname` against these rules:
+
+| Rule | Pattern | Example |
+|---|---|---|
+| No spaces | Reject if contains space | `Cebu_PlantB_Unit1_VA_Mag` ✓ |
+| No special chars | Only alphanumeric + underscore | `Cebu_PlantB_Unit1_VA_Mag` ✓ |
+| Follows hierarchy | `Location_Plant_Unit_Attribute` | `Cebu_PlantB_Unit1_Status` ✓ |
+| Matches AF path | Location/Plant/Unit names must match AF element names exactly | — |
+
+If a tag name fails validation — log it, skip that tag, continue with the next.
+Surface all naming violations to the BA at the end as a batch — not one by one.
 
 ---
 
 ## Step-by-step execution
 
-### Phase 1 — Create Element Templates (Library)
-
-Run these steps **once per project**, not once per element.
-
-**Step 1.1 — Create top-level element templates**
-
-For each template in the standard set (Company, Location, PowerPlant, Transformer, Unit):
-
+### Step 1 — Confirm Data Server is reachable
 ```
-Tool: create_element_template
-Input:
-  - name: <template name>
-  - database: <AF database name>
-  - base_template: null (these are root templates)
+Tool: list_data_servers
+Expected: PI-SYSTEM in the list
+If not found: stop — cannot verify or create tags
 ```
 
-Expected result: Template appears in Library → Templates → Element Templates.
-
-**Step 1.2 — Create Attribute Templates for each Element Template**
-
-For each attribute in the standard set per template:
-
+### Step 2 — Check existing tags
 ```
-Tool: create_attribute_template
-Input:
-  - element_template: <parent template name>
-  - name: <attribute name>         e.g. "Status", "VA_Mag"
-  - value_type: <type>             e.g. "String", "Double", "Timestamp"
-  - default_uom: <unit>            e.g. "V", "°", null
-  - data_reference: "PI Point"     for raw attributes
-  - data_reference: null           for derived attributes (analysis handles it)
-  - default_value: <value>         e.g. "Active" for Status
+Tool: get_point
+Input tag_name: <Proposed New Tagname>
+If found: skip creation, log "already exists", proceed to Step 4
+If not found: surface to BA — tag needs to be created manually in Point Builder
+             (create_pi_tag is not yet in the MCP — see note below)
 ```
 
-**Standard attribute set for Unit template:**
-
-| Attribute | Value Type | UOM | Source |
-|---|---|---|---|
-| Status | String | — | PI Point (raw) |
-| Timestamp | Timestamp | — | PI Point (raw) |
-| VA_Mag | Double | V | PI Point (raw) |
-| VA_Phase | Double | ° | PI Point (raw) |
-| VB_Mag | Double | V | PI Point (raw) |
-| VB_Phase | Double | ° | PI Point (raw) |
-| VC_Mag | Double | — | Derived (formula) |
-| VC_Phase | Double | — | Derived (formula) |
-
----
-
-### Phase 2 — Create Elements (Elements tab)
-
-For each row in the tag list, create the hierarchy path if it does not already exist.
-
-**Step 2.1 — Create root element (DataGrid)**
-
+### Step 3 — Read current attribute data reference
 ```
-Tool: create_element
-Input:
-  - name: "DataGrid"
-  - parent: null (root)
-  - template: null
-  - database: <AF database>
+Tool: get_attribute_by_path
+Input path: \\PI-SYSTEM\GoogleManualLogger\DataGrid\<Location>\<Plant>\<Unit>|<Attribute>
+Check: does DataReferencePlugIn = "PI Point" already?
+If yes: log "already linked", skip Step 4
+If no: proceed to Step 4
 ```
 
-Only create if it does not already exist. Use `get_element_tree` to check first.
-
-**Step 2.2 — Create Location elements**
-
+### Step 4 — Set attribute value (config items only)
 ```
-Tool: create_element
-Input:
-  - name: <location>      e.g. "Cebu", "Davao"
-  - parent: "DataGrid"
-  - template: "Location"
+Tool: set_attribute_value
+Input web_id: <attribute WebId from Step 3>
+Input value:  <value from tag list>
+Only for configuration item attributes (non-stream)
+For stream attributes (PI Point linked): use update_stream_value instead
 ```
 
-**Step 2.3 — Create PowerPlant elements**
-
+### Step 5 — Verify live value
 ```
-Tool: create_element
-Input:
-  - name: <plant>         e.g. "Plant A"
-  - parent: <location>
-  - template: "PowerPlant"
-```
-
-**Step 2.4 — Create Unit elements**
-
-```
-Tool: create_element
-Input:
-  - name: <unit>          e.g. "Unit1"
-  - parent: <plant>
-  - template: "Unit"
+Tool: get_stream_value
+Input web_id: <attribute WebId>
+Confirms the attribute is receiving data from PI Data Archive
+If value = "No Data": flag in report — tag may not be sending data yet
 ```
 
 ---
 
-### Phase 3 — Verify hierarchy
+## Note on tag creation
 
-After all elements are created:
+`create_pi_tag` is intentionally not in the current MCP tools.
+During exploration phase, tags are created manually in Point Builder by the BA.
+The MCP handles verification and data reference assignment only.
 
-```
-Tool: get_element_tree
-Input:
-  - root: "DataGrid"
-  - database: <AF database>
-```
+This is a guardrail — tag creation is a write operation that can't be undone easily.
+Once the workflow is validated end-to-end, `create_pi_tag` will be added with full
+BA confirmation flow.
 
-Compare the returned tree against the expected structure from the tag list. Surface any missing elements to the BA before proceeding.
+---
+
+## Batch processing order per Unit
+
+Process attributes in this order for each Unit element:
+
+1. `Status` (String — config item)
+2. `Timestamp` (Timestamp)
+3. `VA_Mag`, `VA_Phase` (Phase A — raw)
+4. `VB_Mag`, `VB_Phase` (Phase B — raw)
+5. Skip `VC_Mag`, `VC_Phase` — these are derived, handled by `pi-analysis` skill
 
 ---
 
@@ -139,19 +132,20 @@ Compare the returned tree against the expected structure from the tag list. Surf
 
 | Error | Action |
 |---|---|
-| Template already exists | Skip creation, log "already exists", continue |
-| Element already exists | Skip creation, log "already exists", continue |
-| Parent element not found | Stop and surface to BA — do not create orphaned elements |
-| Tool call fails 2x | Stop phase, surface error, wait for BA instruction |
+| Tag not found | Log "tag missing", skip data ref assignment, flag for BA |
+| Naming violation | Log violation with row number, skip, continue |
+| Attribute not found in AF | Stop this unit, surface to BA — do not continue |
+| `set_attribute_value` returns 400 | Log "malformed request", skip, continue |
+| `set_attribute_value` returns 409 | Log "incompatible units", flag for BA review |
 
 ---
 
-## Output
+## Output of this skill
 
-After this skill completes, the BA should see in PI System Explorer:
+- List of attributes successfully linked to PI tags
+- List of attributes skipped (already linked)
+- List of tags missing from PI Data Archive (needs manual creation)
+- List of naming violations
+- Live value check results (receiving data / no data)
 
-- All Element Templates visible in Library → Templates → Element Templates
-- All Attribute Templates visible under each Element Template
-- Complete element hierarchy under Elements → DataGrid → [Locations] → [Plants] → [Units]
-
-Proceed to `pi-tag-creator` skill next.
+Proceed to `pi-analysis` skill for derived attributes (VC_Mag, VC_Phase).

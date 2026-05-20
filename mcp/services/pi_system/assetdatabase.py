@@ -52,10 +52,9 @@ class AssetDatabases:
             return UserResponse.error(message="No path provided", code=400)
         
         response = self.pi_system.send_request(
-            method="GET", 
-            endpoint=endpoint, 
-            path=path, 
-            params=params
+            method="GET",
+            endpoint=endpoint,
+            path=path
         )
         
         if not response:

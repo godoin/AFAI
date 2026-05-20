@@ -1,117 +1,126 @@
-# Skill: PI Analysis Creator
+# Skill: PI Analysis
 
-**Trigger:** Use this skill when the task involves creating PI Analysis expressions for derived AF attributes — formulas that compute values from other attributes or PI tags.
+**Trigger:** Use this skill when the task involves reading existing analyses on AF elements,
+verifying analysis expressions, or checking the output of derived attributes.
 
----
-
-## What this skill does
-
-Creates PI Analysis definitions on AF elements for derived attributes. Analyses run in PI Analysis Service and continuously write computed values back to output attributes (or PI tags).
+Prerequisite: `pi-tag-creator` skill must have completed — all raw attributes must be
+linked to PI tags before derived attributes can be verified.
 
 ---
 
-## Prerequisites before running
+## Available MCP tools for this skill
 
-- [ ] `pi-af-builder` and `pi-tag-creator` skills are complete
-- [ ] All raw attributes have PI Point data references assigned and confirmed
-- [ ] Formula list is validated — all required columns present
-- [ ] No formula references an attribute that does not exist in the AF element
-- [ ] BA has approved the preview
+| Tool | When to use |
+|---|---|
+| `get_element_by_path` | Get the element WebId before reading its analyses |
+| `get_attribute_by_path` | Check a derived attribute's current value and data reference |
+| `get_stream_value` | Read the live computed value of a derived attribute |
+| `get_data_from_database` | Batch: pull all elements + attributes for a given template |
+
+---
+
+## Derived attributes in this project
+
+These attributes are computed — they do not map to raw PI tags.
+Their values come from PI Analysis expressions.
+
+| Attribute | Expected source | Example expression |
+|---|---|---|
+| `VC_Mag` | Analysis expression | `Sqrt(Sqr('VA_Mag') + Sqr('VB_Mag'))` |
+| `VC_Phase` | Analysis expression | `Atan2('VA_Phase', 'VB_Phase') * 180 / PI()` |
 
 ---
 
 ## Formula list expected format
 
-| Column | Required | Description |
+The client must provide a formula list with these columns.
+Validate before running — stop and surface errors if columns are missing.
+
+| Column | Required | Notes |
 |---|---|---|
-| `element_path` | Yes | AF path e.g. `DataGrid\Cebu\Plant B\Unit1` |
-| `analysis_name` | Yes | Name of the analysis e.g. `Analysis1` |
-| `variable_name` | Yes | Variable identifier in the expression e.g. `Variable1` |
-| `expression` | Yes | PI expression string e.g. `Abs('VA_Mag')` |
-| `output_attribute` | Yes | Target AF attribute e.g. `VC_Mag` |
+| `element_path` | Yes | AF path to the element the analysis lives on |
+| `analysis_name` | Yes | e.g. `Analysis1` |
+| `variable_name` | Yes | e.g. `Variable1` |
+| `expression` | Yes | PI expression string |
+| `output_attribute` | Yes | Target derived attribute e.g. `VC_Mag` |
 | `scheduling` | Yes | `EventTriggered` or `Periodic` |
-| `trigger` | No | For EventTriggered: `Any Input`. For Periodic: interval e.g. `1h` |
+| `trigger` | No | `Any Input` for EventTriggered, interval for Periodic |
 
 ---
 
 ## Step-by-step execution
 
-### Phase 1 — Validate formula references
-
-Before creating any analysis, verify that every attribute referenced in the expression exists on the element.
-
-For each expression variable:
-- Parse the expression for attribute references (quoted names e.g. `'VA_Mag'`)
-- Confirm each referenced attribute exists on the target element via `get_element_tree`
-- If any referenced attribute is missing — **stop and surface to BA, do not proceed**
-
-### Phase 2 — Create Analysis
-
+### Step 1 — Confirm raw attributes are linked first
 ```
-Tool: create_analysis
-Input:
-  - element_path: <element_path>
-  - analysis_name: <analysis_name>      e.g. "Analysis1"
-  - analysis_type: "Expression"         default for formula-based
-  - variable_name: <variable_name>      e.g. "Variable1"
-  - expression: <expression>            e.g. "Abs('VA_Mag')"
-  - output_attribute: <attribute>       e.g. "VC_Mag"
-  - scheduling: <scheduling>            "EventTriggered" or "Periodic"
-  - trigger_on: <trigger>               e.g. "Any Input" or "1h"
+Tool: get_attribute_by_path
+Check: VA_Mag, VA_Phase, VB_Mag, VB_Phase all have DataReferencePlugIn = "PI Point"
+If any raw attribute is not linked: stop — analysis cannot compute without source data
+Surface the missing links to the BA before continuing
 ```
 
-### Phase 3 — Verify analysis status
+### Step 2 — Read the derived attribute current state
+```
+Tool: get_attribute_by_path
+Input path: \\PI-SYSTEM\GoogleManualLogger\DataGrid\<Location>\<Plant>\<Unit>|VC_Mag
+Check: DataReferencePlugIn — should be null or "PI Point" depending on setup
+Check: current value — if 0 or "No Data", analysis may not be running
+```
 
-After creation, check that the analysis is connected to PI Analysis Service.
+### Step 3 — Read the live computed value
+```
+Tool: get_stream_value
+Input web_id: <VC_Mag attribute WebId>
+Expected: a computed numeric value
+If "No Data": PI Analysis Service may not be running or expression has an error
+Flag this in the report — do not attempt to fix automatically
+```
 
-Expected status: `Connected to the PI Analysis Service` (visible in PI System Explorer → Analyses tab, bottom status bar).
-
-If not connected after 30 seconds — log warning, continue, flag in report for BA to manually check.
+### Step 4 — Batch verification across all Units
+```
+Tool: get_data_from_database
+Input database_path: \\PI-SYSTEM\GoogleManualLogger
+Input template_name: Unit
+Returns: all Unit elements with their attributes
+Use this to verify VC_Mag and VC_Phase across all units at once
+More efficient than checking each unit individually
+```
 
 ---
 
 ## Supported PI expression functions
 
-The following functions are available in PI Analysis expressions. Claude must only use functions from this list — never invent function names.
+Only use functions from this list. Never invent function names.
 
-**Math:**
-`Abs`, `Acos`, `Asin`, `Atan`, `Atan2`, `Ceiling`, `Cos`, `Exp`, `Floor`, `Ln`, `Log`, `Log10`, `Mod`, `Round`, `Sign`, `Sin`, `Sqrt`, `Tan`, `Truncate`
+**Math:** `Abs`, `Acos`, `Asin`, `Atan`, `Atan2`, `Ceiling`, `Cos`, `Exp`,
+`Floor`, `Ln`, `Log`, `Log10`, `Mod`, `Round`, `Sign`, `Sin`, `Sqrt`, `Tan`, `Truncate`
 
-**Comparison / Logic:**
-`If`, `And`, `Or`, `Not`, `IsSet`, `IsNoData`
+**Logic:** `If`, `And`, `Or`, `Not`, `IsSet`, `IsNoData`
 
-**String:**
-`Concat`, `Left`, `Len`, `Mid`, `Right`, `Trim`, `Upper`, `Lower`
+**String:** `Concat`, `Left`, `Len`, `Mid`, `Right`, `Trim`, `Upper`, `Lower`
 
-**Time / Statistics:**
-`Average`, `Count`, `Maximum`, `Minimum`, `Range`, `StdDev`, `Total`, `TagVal`, `PrevVal`
+**Statistics:** `Average`, `Count`, `Maximum`, `Minimum`, `Range`, `StdDev`, `Total`
 
-**Phase calculations (common for electrical attributes):**
-`Sqrt(Sqr('VA_Mag') + Sqr('VB_Mag'))` — magnitude calculation pattern
-`Atan2('VA_Phase', 'VB_Phase') * 180 / PI()` — phase angle pattern
+**Time-series:** `TagVal`, `PrevVal`
+
+**Common patterns for electrical attributes:**
+```
+Magnitude:   Sqrt(Sqr('VA_Mag') + Sqr('VB_Mag'))
+Phase angle: Atan2('VA_Phase', 'VB_Phase') * 180 / PI()
+```
 
 ---
 
-## Naming conventions
+## Note on analysis creation
 
-Analysis names follow the pattern:
+`create_analysis` is intentionally not in the current MCP tools.
+During exploration phase, analyses are created manually in PI System Explorer
+by the BA using the Analyses tab.
 
-```
-Analysis<N>           e.g. Analysis1, Analysis2
-```
+This skill handles verification of existing analyses only — reading outputs,
+confirming the Analysis Service is running, and surfacing problems.
 
-Or descriptive names if provided in the formula list:
-
-```
-VC_Magnitude_Calc
-VC_Phase_Calc
-```
-
-Variable names follow the pattern:
-
-```
-Variable<N>           e.g. Variable1
-```
+`create_analysis` will be added once the read/verify workflow is stable
+and the BA has approved the formula list.
 
 ---
 
@@ -119,31 +128,19 @@ Variable<N>           e.g. Variable1
 
 | Error | Action |
 |---|---|
-| Referenced attribute not found | Stop this analysis, surface to BA, skip, continue with next |
-| Invalid function name in expression | Surface to BA — do not create with invalid function |
-| Analysis already exists with same name | Ask BA: overwrite or skip? Never auto-overwrite |
-| Analysis service not connected after 60s | Log warning, flag in report, continue |
-| Tool call fails 2x | Stop and surface to BA |
+| Raw attribute not linked | Stop — surface to BA, do not proceed |
+| Derived attribute = "No Data" | Flag in report — likely analysis not running |
+| Expression references missing attribute | Stop this analysis, surface to BA |
+| `get_stream_value` returns 400/500 | Log error, skip, flag in report |
 
 ---
 
-## Output
+## Output of this skill
 
-After this skill completes:
+- For each derived attribute (VC_Mag, VC_Phase) across all Units:
+  - Current computed value (or "No Data")
+  - Whether the analysis is connected to PI Analysis Service
+  - Any expressions that reference attributes that don't exist
+- Summary: N attributes verified, N with data, N with no data, N errors
 
-- All derived attributes have an analysis created under the element's Analyses tab
-- Each analysis shows the correct expression, variable mapping, and output attribute
-- Analysis status shows "Connected to PI Analysis Service"
-- Validation report section: "Analyses created: N, Skipped: N, Warnings: N, Errors: N"
-
----
-
-## Full job complete
-
-When all three skills have run successfully:
-
-1. Generate the full validation report (totals across all three phases)
-2. Present the report to the BA for final review
-3. Wait for BA approval or rejection
-4. On approval — write the final audit log entry and mark job as `APPROVED`
-5. On rejection — mark job as `REJECTED`, log the reason, do not re-execute automatically
+This is the final verification step. Surface the full report to the BA for approval.
