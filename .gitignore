@@ -1,0 +1,52 @@
+# macOS system files
+.DS_Store
+
+# Python files
+__pycache__/
+*.pyc
+
+# Python virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# IDE/project settings
+.idea/
+.vscode/
+
+# Node.js dependencies
+node_modules/
+
+# OAuth & credentials
+credentials/*
+saved_accounts.json
+saved_pi_system.json
+saved_service.json
+build/*
+dist/*
+app.spec
+
+# Uploads & backup
+static/assets/uploads/*
+backup/*
+
+# Logs & docs
+*.log
+payload-readme.md
+
+# Data files
+*.csv
+sheet.json
+
+# Test files
+test.py
+
+# Tokens
+oauth_credentials.json
+oauth_token.json
+token.json
+saved_credentials.json
+gservice_credentials.json
+app_token.json
+config.json
