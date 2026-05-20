@@ -239,6 +239,88 @@ class Elements:
             code=response.status_code
         )
 
+    def create(
+        self,
+        parent_web_id: str,
+        name: str,
+        description: str = "",
+        template_name: str = "",
+        parent_type: str = "element"
+    ):
+        """
+        Create a new AF element under a parent database or element.
+
+        Docs:
+          POST assetdatabases/{webId}/elements  — parent_type="database"
+          POST elements/{webId}/elements        — parent_type="element"
+
+        Returns 201 on success with a Location header pointing to the new element.
+
+        GUARDRAILS — only call when ALL of the following are true:
+          1. BA has explicitly requested this element be created.
+          2. get_element or get_element_by_path has confirmed an element with
+             the same name does NOT already exist under the parent.
+          3. template_name (if provided) has been verified via
+             get_element_template or get_element_template_by_path.
+          4. No more than one create call per conversation turn without
+             BA confirmation in between.
+
+        Arguments:
+            parent_web_id   WebId of the parent database or element
+            name            Element name — must not conflict with an existing sibling
+            description     Optional human-readable description
+            template_name   Optional element template name to instantiate
+            parent_type     "database" or "element" (default "element")
+        """
+        if not parent_web_id:
+            logger.error("No parent_web_id provided for create.", exc_info=False)
+            return UserResponse.error(message="Unexpected error occurred. Please check logs.", code=400)
+
+        if not name:
+            logger.error("No element name provided for create.", exc_info=False)
+            return UserResponse.error(message="Element name is required.", code=400)
+
+        if parent_type not in ("database", "element"):
+            logger.error(f"Invalid parent_type '{parent_type}'. Must be 'database' or 'element'.", exc_info=False)
+            return UserResponse.error(
+                message="Invalid parent_type. Must be 'database' or 'element'.",
+                code=400
+            )
+
+        if parent_type == "database":
+            endpoint = f"assetdatabases/{parent_web_id}/elements"
+        else:
+            endpoint = f"elements/{parent_web_id}/elements"
+
+        payload = {"Name": name, "Description": description}
+        if template_name:
+            payload["TemplateName"] = template_name
+
+        response = self.pi_system.send_request(
+            method="POST",
+            endpoint=endpoint,
+            data=payload
+        )
+
+        if not response:
+            logger.error(f"Failed to create element '{name}' under parent {parent_web_id}.", exc_info=False)
+            return UserResponse.error(message="Unexpected error occurred. Please check logs.", code=500)
+
+        if response.status_code == 409:
+            logger.error(f"Conflict creating element '{name}' — may already exist under parent {parent_web_id}.", exc_info=False)
+            return UserResponse.error(
+                message=f"Element '{name}' may already exist under this parent. Verify before retrying.",
+                code=409
+            )
+
+        # 201 Created — no body; Location header holds the new element URL
+        location = response.headers.get("Location", "")
+        return UserResponse.success(
+            message=f"Successfully created element '{name}'. Location: {location}",
+            response={"Name": name, "Location": location},
+            code=response.status_code
+        )
+
     def update(self):
         pass
 

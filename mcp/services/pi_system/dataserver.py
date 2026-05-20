@@ -212,3 +212,104 @@ class DataServer:
             response={"Name": name, "Location": location},
             code=response.status_code
         )
+
+    def batch_create_points(
+        self,
+        web_id: str,
+        tags: list,
+        endpoint: str = "dataservers"
+    ):
+        """
+        Create multiple PI points in a single PI Web API batch request.
+
+        Each entry in `tags` must have: name, point_type, descriptor,
+        engineering_units, and optionally point_class (default "classic")
+        and step (default False).
+
+        Returns a UserResponse whose `response` is a dict of
+        {tag_name: {"success": bool, "status": int, "message": str}}.
+
+        GUARDRAILS — same pre-conditions as create_point apply to every
+        tag in the batch. BA must confirm the full list before calling.
+        """
+        if not web_id:
+            logger.error("No web_id provided for batch_create_points.", exc_info=False)
+            return UserResponse.error(message="Unexpected error occurred. Please check logs.", code=400)
+
+        if not tags:
+            logger.error("No tags provided for batch_create_points.", exc_info=False)
+            return UserResponse.error(message="Tag list is required.", code=400)
+
+        valid_point_types = {"Float32", "Float64", "Int16", "Int32", "String", "Digital", "Timestamp"}
+
+        batch_request = {}
+        # Track request-key → tag name so we can map results back
+        key_to_name = {}
+
+        for tag in tags:
+            name = tag.get("name", "").strip()
+            point_type = tag.get("point_type", "").strip()
+
+            if not name:
+                logger.error("Skipping tag with missing name in batch.", exc_info=False)
+                continue
+
+            if point_type not in valid_point_types:
+                logger.error(f"Skipping tag '{name}': invalid point_type '{point_type}'.", exc_info=False)
+                continue
+
+            # Batch request keys must be unique strings; tag names are safe
+            # (naming convention: only alphanumerics and underscores)
+            request_key = name
+            key_to_name[request_key] = name
+
+            batch_request[request_key] = {
+                "Method": "POST",
+                "Resource": f"{self.pi_system.base_url}/{endpoint}/{web_id}/points",
+                "Content": {
+                    "Name": name,
+                    "PointType": point_type,
+                    "Descriptor": tag.get("descriptor", ""),
+                    "EngineeringUnits": tag.get("engineering_units", ""),
+                    "PointClass": tag.get("point_class", "classic"),
+                    "Step": tag.get("step", False),
+                },
+            }
+
+        if not batch_request:
+            logger.error("No valid tags remain after validation — batch aborted.", exc_info=False)
+            return UserResponse.error(message="No valid tags to create after validation.", code=400)
+
+        raw = self.pi_system.send_batch_request(batch_request)
+
+        if raw is None:
+            logger.error("Batch create points request failed.", exc_info=False)
+            return UserResponse.error(message="Unexpected error occurred. Please check logs.", code=500)
+
+        results = {}
+        for request_key, tag_name in key_to_name.items():
+            entry = raw.get(request_key, {})
+            status = entry.get("Status", 0)
+            if status == 201:
+                location = entry.get("Headers", {}).get("Location", "")
+                results[tag_name] = {
+                    "success": True,
+                    "status": status,
+                    "message": f"Created. Location: {location}",
+                }
+            else:
+                content = entry.get("Content", {})
+                error_msg = content.get("Errors", [status]) if isinstance(content, dict) else status
+                results[tag_name] = {
+                    "success": False,
+                    "status": status,
+                    "message": str(error_msg),
+                }
+
+        created = sum(1 for r in results.values() if r["success"])
+        failed = len(results) - created
+        return UserResponse.success(
+            message=f"Batch complete: {created} created, {failed} failed.",
+            response=results,
+            code=207
+        )

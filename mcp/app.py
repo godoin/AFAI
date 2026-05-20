@@ -32,6 +32,18 @@ data_server       = DataServer(pi)
 points            = Points(pi)
 streams           = Streams(pi)
 
+implementor = TagListImplementor(
+    pi_system=pi,
+    asset_server=asset_server,
+    asset_database=asset_database,
+    elements=elements,
+    attributes=attributes,
+    data_server=data_server,
+    points=points,
+    streams=streams,
+    af_database_path=f"\\\\{PI_SERVER}\\{AF_DATABASE}",
+)
+
 # ── MCP app ────────────────────────────────────────────────────────────────────
 app = Server("pi-system")
 
@@ -181,6 +193,72 @@ async def list_tools():
             }
         ),
         Tool(
+            name="create_element",
+            description=(
+                "Create a new AF element as a child of an existing element (e.g. add a Unit under a PowerPlant). "
+                "WRITE OPERATION — requires explicit BA confirmation before calling. "
+                "Must only be called after: (1) BA explicitly requests the element, "
+                "(2) get_child_elements confirms no sibling with the same name exists, "
+                "(3) template_name (if used) has been verified via get_element_template. "
+                "Returns 201 and the Location URL of the new element on success."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "parent_web_id": {
+                        "type": "string",
+                        "description": "WebId of the parent element (from get_element or get_element_by_path)"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the new element — must not conflict with an existing sibling"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional human-readable description"
+                    },
+                    "template_name": {
+                        "type": "string",
+                        "description": "Optional element template to instantiate e.g. 'Unit', 'PowerPlant'"
+                    }
+                },
+                "required": ["parent_web_id", "name"]
+            }
+        ),
+        Tool(
+            name="create_database_element",
+            description=(
+                "Create a new top-level AF element directly under the AF database (e.g. add a Location). "
+                "WRITE OPERATION — requires explicit BA confirmation before calling. "
+                "Must only be called after: (1) BA explicitly requests the element, "
+                "(2) get_database_elements confirms no element with the same name exists, "
+                "(3) template_name (if used) has been verified via get_element_template. "
+                "Returns 201 and the Location URL of the new element on success."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "parent_web_id": {
+                        "type": "string",
+                        "description": "WebId of the AF database (from get_asset_database or get_asset_database_by_path)"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Name of the new element — must not conflict with an existing top-level element"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional human-readable description"
+                    },
+                    "template_name": {
+                        "type": "string",
+                        "description": "Optional element template to instantiate e.g. 'Location'"
+                    }
+                },
+                "required": ["parent_web_id", "name"]
+            }
+        ),
+        Tool(
             name="get_element_analyses",
             description=(
                 "Get all analyses targeting an AF element by WebId. "
@@ -315,6 +393,61 @@ async def list_tools():
                     "web_id": {"type": "string", "description": "WebId of the Data Server"}
                 },
                 "required": ["web_id"]
+            }
+        ),
+        Tool(
+            name="batch_create_pi_tags",
+            description=(
+                "Create multiple PI points (tags) on a Data Server in a single batch request. "
+                "WRITE OPERATION — requires explicit BA confirmation before calling. "
+                "Must only be called after: (1) BA has confirmed the full tag list, "
+                "(2) search_points confirms none of the tags already exist, "
+                "(3) naming convention validation has passed for every Proposed New Tagname. "
+                "Returns a per-tag success/failure result dict."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "web_id": {
+                        "type": "string",
+                        "description": "WebId of the Data Server (from list_data_servers)"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "description": "List of tag definitions to create",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "PI tag name — must pass naming convention validation"
+                                },
+                                "point_type": {
+                                    "type": "string",
+                                    "description": "Float32 | Float64 | Int16 | Int32 | String | Digital | Timestamp"
+                                },
+                                "descriptor": {
+                                    "type": "string",
+                                    "description": "Human-readable description"
+                                },
+                                "engineering_units": {
+                                    "type": "string",
+                                    "description": "Engineering units e.g. V, A, bar"
+                                },
+                                "point_class": {
+                                    "type": "string",
+                                    "description": "Always 'classic' unless BA specifies otherwise"
+                                },
+                                "step": {
+                                    "type": "boolean",
+                                    "description": "True for stepped/held values, False for interpolated. Default false."
+                                }
+                            },
+                            "required": ["name", "point_type", "descriptor", "engineering_units"]
+                        }
+                    }
+                },
+                "required": ["web_id", "tags"]
             }
         ),
         Tool(
@@ -473,6 +606,8 @@ async def list_tools():
                 "convention validation, cross-check proposed tags against live AF and "
                 "PI Data Archive, and produce a pre-action Excel report for BA review. "
                 "DOES NOT write anything to PI System. "
+                "If the full path does not exist on disk the tool automatically falls "
+                "back to mcp/data/<basename> so passing just a filename works too. "
                 "Present the report to the BA and wait for explicit confirmation "
                 "before calling implement_tag or link_attribute."
             ),
@@ -481,10 +616,60 @@ async def list_tools():
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Absolute path to the uploaded tag list .xlsx or .csv file"
+                        "description": "Full path or just the filename of the tag list .xlsx or .csv file"
                     }
                 },
                 "required": ["file_path"]
+            }
+        ),
+        Tool(
+            name="prepare_tag_list_from_path",
+            description=(
+                "Phases 1–3 + Gate 1 — filename-only variant. "
+                "BA drops the tag list file into the mcp/data/ folder on the PI VM, "
+                "then tells Claude the filename. This tool constructs the full path "
+                "to mcp/data/<filename> and runs the identical parse, validate, and "
+                "pre-action report pipeline. "
+                "DOES NOT write anything to PI System. "
+                "Present the report to the BA and wait for explicit confirmation "
+                "before calling implement_tag or link_attribute."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Filename only (not a full path) e.g. 'TagList_Cebu.xlsx'"
+                    }
+                },
+                "required": ["filename"]
+            }
+        ),
+        Tool(
+            name="prepare_tag_list_from_data",
+            description=(
+                "Phases 1–3 + Gate 1 — Claude Desktop upload variant. "
+                "Accepts the tag list file as a base64-encoded string (as provided "
+                "by Claude Desktop's file attachment) plus the original filename for "
+                "format detection. Saves to a temp file, runs parse + validate + "
+                "pre-action report, then deletes the temp file. "
+                "DOES NOT write anything to PI System. "
+                "Present the report to the BA and wait for explicit confirmation "
+                "before calling implement_tag or link_attribute."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "content_b64": {
+                        "type": "string",
+                        "description": "Base64-encoded file content (data-URI prefix is stripped automatically)"
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Original filename e.g. 'TagList_Cebu.xlsx' — used for format detection"
+                    }
+                },
+                "required": ["content_b64", "filename"]
             }
         ),
         Tool(
@@ -560,6 +745,32 @@ async def list_tools():
                     "value":  {"description": "Value to write"}
                 },
                 "required": ["web_id", "value"]
+            }
+        ),
+
+        # ── Context / meta ────────────────────────────────────────────
+        Tool(
+            name="read_context_file",
+            description=(
+                "Read a file from the mcp/ directory by relative path and return "
+                "its contents as a string. Use this at session start to load "
+                "CLAUDE.md, GUARDRAILS.md, and skill files in .claude/skills/. "
+                "Paths must be relative (no leading slash, no '..' segments). "
+                "Examples: 'CLAUDE.md', 'GUARDRAILS.md', "
+                "'.claude/skills/pi-tag-list-intake.md'."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "relative_path": {
+                        "type": "string",
+                        "description": (
+                            "Path relative to the mcp/ directory. "
+                            "Must not contain '..' or start with '/'."
+                        )
+                    }
+                },
+                "required": ["relative_path"]
             }
         ),
 
@@ -640,6 +851,24 @@ async def call_tool(name: str, arguments: dict):
             search_full_hierarchy=arguments.get("search_full_hierarchy", False)
         ))
 
+    if name == "create_element":
+        return wrap(elements.create(
+            parent_web_id=arguments["parent_web_id"],
+            name=arguments["name"],
+            description=arguments.get("description", ""),
+            template_name=arguments.get("template_name", ""),
+            parent_type="element"
+        ))
+
+    if name == "create_database_element":
+        return wrap(elements.create(
+            parent_web_id=arguments["parent_web_id"],
+            name=arguments["name"],
+            description=arguments.get("description", ""),
+            template_name=arguments.get("template_name", ""),
+            parent_type="database"
+        ))
+
     if name == "get_element_analyses":
         return wrap(elements.get_analyses(arguments["web_id"]))
 
@@ -676,6 +905,12 @@ async def call_tool(name: str, arguments: dict):
 
     if name == "get_data_server_points":
         return wrap(data_server.get_points(arguments["web_id"]))
+
+    if name == "batch_create_pi_tags":
+        return wrap(data_server.batch_create_points(
+            web_id=arguments["web_id"],
+            tags=arguments["tags"]
+        ))
 
     if name == "create_pi_tag":
         return wrap(data_server.create_point(
@@ -717,6 +952,17 @@ async def call_tool(name: str, arguments: dict):
     if name == "prepare_tag_list":
         return wrap(implementor.prepare(arguments["file_path"]))
 
+    if name == "prepare_tag_list_from_path":
+        return wrap(implementor.prepare(
+            str(implementor._data_dir / arguments["filename"])
+        ))
+
+    if name == "prepare_tag_list_from_data":
+        return wrap(implementor.prepare_from_data(
+            content_b64=arguments["content_b64"],
+            filename=arguments["filename"]
+        ))
+
     if name == "implement_tag":
         return wrap(implementor.implement_one(
             tag_name=arguments["tag_name"],
@@ -741,6 +987,37 @@ async def call_tool(name: str, arguments: dict):
             arguments["database_path"],
             arguments["template_name"]
         ))
+
+    # ── Context / meta ─────────────────────────────────────────────────────────
+    if name == "read_context_file":
+        import pathlib
+        relative_path = arguments.get("relative_path", "")
+
+        # Reject absolute paths and any path containing ".." before resolution
+        if not relative_path:
+            return [TextContent(type="text", text="Error: relative_path is required.")]
+        if relative_path.startswith("/") or relative_path.startswith("\\"):
+            return [TextContent(type="text", text="Error: absolute paths are not allowed.")]
+        if ".." in pathlib.PurePosixPath(relative_path).parts or ".." in pathlib.PureWindowsPath(relative_path).parts:
+            return [TextContent(type="text", text="Error: '..' segments are not allowed.")]
+
+        mcp_root = pathlib.Path(__file__).resolve().parent
+        target   = (mcp_root / relative_path).resolve()
+
+        # Double-check resolved path is still inside mcp/
+        if not str(target).startswith(str(mcp_root)):
+            return [TextContent(type="text", text="Error: path escapes the mcp/ directory.")]
+
+        if not target.exists():
+            return [TextContent(type="text", text=f"Error: file not found: '{relative_path}'.")]
+        if not target.is_file():
+            return [TextContent(type="text", text=f"Error: '{relative_path}' is a directory, not a file.")]
+
+        try:
+            contents = target.read_text(encoding="utf-8")
+            return [TextContent(type="text", text=contents)]
+        except Exception as e:
+            return [TextContent(type="text", text=f"Error reading '{relative_path}': {e}")]
 
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 

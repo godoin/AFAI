@@ -1,7 +1,14 @@
+import base64
 import os
 import tempfile
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+# Resolved once at import time — works regardless of the process cwd.
+# mcp/core/tag_list/implementor.py → parents[2] = mcp/
+_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+_TEMP_DIR = _DATA_DIR / "temp"
 
 from core.logger import logger
 from core.models import UserResponse
@@ -122,6 +129,7 @@ class TagListImplementor:
         self._parser    = TagListParser()
         self._reporter  = TagListReportGenerator()
         self._data_server_web_id: Optional[str] = None
+        self._data_dir  = _DATA_DIR
 
     # ── Public: Phase 0 — session start ──────────────────────────────────────
 
@@ -174,23 +182,45 @@ class TagListImplementor:
         Phases 1–Gate 1: parse file, validate, build pre-action report.
 
         Args:
-            file_path: Path to the uploaded tag list file (.xlsx or .csv)
+            file_path: Path to the tag list file (.xlsx or .csv).
+                       If the path does not exist on disk, the method falls
+                       back to mcp/data/<basename> so the BA can drop the
+                       file into that folder and pass just a filename or
+                       short path.
 
         Returns a UserResponse dict with:
             response = {
-                "report_path":      str   — path to the pre-action Excel
-                "summary":          dict  — counts for the BA message
-                "validation_id":    str   — key to retrieve ValidationResult later
+                "report_path":  str  — path to the pre-action Excel
+                "summary":      dict — counts for the BA message
             }
 
-        The ValidationResult is stored on self._pending so implement()
+        The ValidationResult is stored on self._pending_vr so implement()
         can pick it up after BA confirmation. Only one pending validation
         is held at a time — calling prepare() again replaces it.
         """
-        logger.info(f"Phase 1–3: preparing tag list from {file_path}", exc_info=False)
+        resolved = Path(file_path)
+        if not resolved.exists():
+            fallback = _DATA_DIR / resolved.name
+            if fallback.exists():
+                logger.info(
+                    f"'{file_path}' not found; using '{fallback}'.",
+                    exc_info=False
+                )
+                resolved = fallback
+            else:
+                return UserResponse.error(
+                    message=(
+                        f"File not found: '{file_path}'. "
+                        f"Also checked '{fallback}'. "
+                        f"Drop the file into the mcp/data/ folder and try again."
+                    ),
+                    code=404
+                )
+
+        logger.info(f"Phase 1–3: preparing tag list from {resolved}", exc_info=False)
 
         # Phase 2 — parse
-        parse_result = self._parser.parse(file_path)
+        parse_result = self._parser.parse(str(resolved))
         if not parse_result.success:
             return UserResponse.error(
                 message=parse_result.error_message,
@@ -237,6 +267,70 @@ class TagListImplementor:
             },
             code=200
         )
+
+    def prepare_from_data(self, content_b64: str, filename: str) -> dict:
+        """
+        Phases 1–Gate 1 — Claude Desktop variant.
+
+        Accepts the tag list file as a base64-encoded string (as delivered by
+        Claude Desktop's file upload mechanism) plus a filename hint used to
+        detect the file format (.xlsx / .xls / .csv).
+
+        Steps:
+            1. Decode the base64 payload.
+            2. Save to mcp/data/temp/<filename>.
+            3. Run the identical parse + validate + report pipeline as prepare().
+            4. Delete the temp file unconditionally (success or failure).
+
+        Args:
+            content_b64: Base64-encoded file content (no data-URI prefix needed,
+                         but a "data:...;base64," prefix is stripped if present).
+            filename:    Original filename, used only for extension detection and
+                         as the temp file name.
+
+        Returns the same UserResponse shape as prepare().
+        """
+        if not content_b64:
+            return UserResponse.error(message="No file content provided.", code=400)
+
+        if not filename:
+            return UserResponse.error(message="Filename is required to detect file format.", code=400)
+
+        suffix = Path(filename).suffix.lower()
+        if suffix not in (".xlsx", ".xls", ".csv"):
+            return UserResponse.error(
+                message=f"Unsupported file type '{suffix}'. Provide an .xlsx, .xls, or .csv file.",
+                code=400
+            )
+
+        # Strip data-URI prefix if present (e.g. "data:application/...;base64,<data>")
+        if "," in content_b64 and content_b64.startswith("data:"):
+            content_b64 = content_b64.split(",", 1)[1]
+
+        try:
+            file_bytes = base64.b64decode(content_b64)
+        except Exception as e:
+            return UserResponse.error(message=f"Failed to decode file content: {e}", code=400)
+
+        _TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        temp_path = _TEMP_DIR / filename
+
+        try:
+            temp_path.write_bytes(file_bytes)
+            logger.info(f"Temp file written: {temp_path}", exc_info=False)
+            return self.prepare(str(temp_path))
+        except Exception as e:
+            logger.error(f"Failed to write temp file '{temp_path}': {e}", exc_info=False)
+            return UserResponse.error(
+                message=f"Failed to save uploaded file: {e}",
+                code=500
+            )
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+                logger.info(f"Temp file cleaned up: {temp_path}", exc_info=False)
+            except Exception:
+                pass
 
     # ── Public: Phase 4 — implement one tag ───────────────────────────────────
 
